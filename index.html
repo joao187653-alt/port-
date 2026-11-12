@@ -438,11 +438,28 @@ win.classList.toggle('open',v);fab.classList.toggle('on',v);fab.classList.add('s
 fab.setAttribute('aria-expanded',v?'true':'false');
 fab.setAttribute('aria-label',v?'Fechar chat com a Ascend AI':'Abrir chat com a Ascend AI');
 if(v){
-if(!greeted){greeted=true;addMsg(WELCOME,'bot')}
+if(!greeted){greeted=true;addMsg(WELCOME,'bot');if(DEBUG)addMsg('[diagnóstico] versão '+BUILD+' ativa · origem: '+location.origin,'bot')}
 toBottom();
 if(window.matchMedia&&window.matchMedia('(pointer:fine)').matches)setTimeout(function(){input.focus()},250);
 }
 }
+var DEBUG=/[?&#]aidebug/.test(location.search+location.hash);
+var BUILD='diag-v2';window.ASCEND_AI_BUILD=BUILD;if(DEBUG)console.info('[Ascend AI] build '+BUILD+' ativo | origem: '+location.origin);
+function fail(code,info,detail){var e=new Error(detail);e.aiCode=code;e.aiInfo=info;return e}
+function report(e){
+console.error('[Ascend AI] falha ('+e.aiCode+'): '+e.message,e.aiInfo);
+if(e.aiCode==='network'||e.aiCode==='timeout')console.warn('[Ascend AI] Causas comuns: (1) o Worker não responde ao preflight OPTIONS ou não devolve Access-Control-Allow-Origin para '+location.origin+'; (2) a página está num ambiente que bloqueia requisições externas (ex.: prévia do Claude); (3) sem internet; (4) Worker fora do ar. Rode ascendAIDiagnose() no console para detalhes.');
+}
+function userMsg(e){
+var m=(e.aiCode==='network'||e.aiCode==='timeout')?ERR:'O assistente está indisponível no momento. Tente novamente em instantes.';
+return DEBUG?m+'\n\n[diagnóstico] '+e.aiCode+' — '+e.message:m;
+}
+window.ascendAIDiagnose=function(){
+console.group('[Ascend AI] diagnóstico');
+console.log({endpoint:URL_CHAT,origin:location.origin,protocol:location.protocol,online:navigator.onLine});
+function step(label,opts){return fetch(URL_CHAT,opts).then(function(r){return r.text().then(function(t){console.log(label,'→ HTTP',r.status,'|',r.headers.get('content-type'),'|',t.slice(0,300))})}).catch(function(e){console.error(label,'→ FALHOU sem resposta legível:',e&&e.name,e&&e.message)})}
+return step('OPTIONS',{method:'OPTIONS'}).then(function(){return step('POST',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:[{role:'user',content:'Olá!'}]})})}).then(function(){console.groupEnd();return 'fim do diagnóstico'});
+};
 function submit(){
 var text=input.value.trim();
 if(!text||busy)return;
@@ -452,16 +469,27 @@ input.value='';grow();
 busy=true;refresh();showTyping();
 var ctl=window.AbortController?new AbortController():null;
 var timer=setTimeout(function(){ctl&&ctl.abort()},45000);
+var t0=Date.now();
 fetch(URL_CHAT,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:history.slice(-20)}),signal:ctl?ctl.signal:undefined})
-.then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()})
-.then(function(data){
+.then(function(r){
+return r.text().then(function(txt){
+var info={status:r.status,contentType:r.headers.get('content-type'),ms:Date.now()-t0,body:txt.slice(0,400)};
+if(!r.ok)throw fail('http',info,'HTTP '+r.status);
+var data;try{data=JSON.parse(txt)}catch(_){throw fail('json',info,'resposta não é JSON válido')}
 var reply=data&&typeof data.reply==='string'?data.reply.trim():'';
-if(!reply)throw new Error('Resposta vazia');
+if(!reply)throw fail('reply',info,'JSON sem o campo "reply"'+(data&&typeof data==='object'?' (campos recebidos: '+Object.keys(data).join(', ')+')':''));
+return reply;
+});
+})
+.then(function(reply){
 hideTyping();history.push({role:'assistant',content:reply});addMsg(reply,'bot');
 })
 .catch(function(e){
-console.error('Ascend AI:',e);
-hideTyping();addMsg(ERR,'bot err');
+if(!e||!e.aiCode){
+var abort=e&&e.name==='AbortError';
+e=fail(abort?'timeout':'network',{ms:Date.now()-t0,origin:location.origin,protocol:location.protocol,online:navigator.onLine,error:String(e&&e.message||e)},abort?'sem resposta em 45 s':'a requisição não chegou a uma resposta legível (rede, CORS ou bloqueio do ambiente)');
+}
+report(e);hideTyping();addMsg(userMsg(e),'bot err');
 })
 .then(function(){clearTimeout(timer);busy=false;refresh();
 if(window.matchMedia&&window.matchMedia('(pointer:fine)').matches)input.focus()});
